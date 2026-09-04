@@ -2,7 +2,7 @@
 - The weighting mechanism works exactly as documented
 - The rollout is not zero-downtime as the guide writes it
 
-When the new LLMInferenceService is not READY, ALLM requests fail with 503.
+When the new LLMInferenceService is not READY, ALL requests fail with 503.
 
 ```bash
 ./scripts/rollout.sh deploy-v1      # step 1: production, weight 9
