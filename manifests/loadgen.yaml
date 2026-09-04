@@ -1,0 +1,42 @@
+# In-cluster traffic generator. The gateway VIP is not reachable from a laptop,
+# and the point of the POC is a client that never stops calling while versions
+# change underneath it -- so the client lives in the cluster.
+#
+# __URL__ / __MODEL__ are filled in by scripts/probe.sh from the LLMISVC status.
+# Each line of stdout is: <epoch_ms> <worker> <http_code> <seconds>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollout-probe
+  namespace: robshaw-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: rollout-probe }
+  template:
+    metadata:
+      labels: { app: rollout-probe }
+    spec:
+      containers:
+        - name: probe
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          resources:
+            requests: { cpu: 500m, memory: 256Mi }
+            limits: { cpu: "2", memory: 512Mi }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              URL='__URL__'
+              MODEL='__MODEL__'
+              worker() {
+                while true; do
+                  code=$(curl -s -o /dev/null -m 60 \
+                    -w '%{http_code} %{time_total}' \
+                    -X POST "$URL" \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"model\":\"$MODEL\",\"prompt\":\"The capital of France is\",\"max_tokens\":16,\"temperature\":0}")
+                  echo "$(date +%s%3N) $1 $code"
+                done
+              }
+              for i in 1 2 3 4; do worker "$i" & done
+              wait

@@ -1,0 +1,45 @@
+Captured from `scripts/probe.sh report` at the end of the seven rollout steps,
+before the follow-up diagnosis runs. 4 concurrent clients on the publisher path
+/publishers/robshaw-dev/models/gemma-4-rollout/v1/completions throughout.
+
+REQUESTS
+  total          106340
+  http 200       37137
+  non-200        69203
+  window         1712s  (62.1 req/s)
+  latency p50/p99  0.15s / 0.16s
+  failure codes  {'503': 69174, '500': 29}
+  max gap between successes  277.95s
+
+PER-REQUEST STATUS BY PHASE  (phases delimited by timeline marks)
+  probe-start (v1 only, 100%)                    20s  n=504   {'200': 504}
+  deploy-v2 (canary starting)                   336s  n=70687 {'200': 1518, '503': 69169}
+  canary 9:1 (90/10)                            204s  n=5387  {'200': 5387}
+  ramp to 9:9 (50/50)                           196s  n=5195  {'200': 5195}
+  promote (v1 stopped, v2 100%)                 190s  n=4850  {'200': 4816, '503': 5, '500': 29}
+  rollback (v1 restarted, weights back to 9:1)  609s  n=15634 {'200': 15634}
+  steady state after rollback (9:1)             157s  n=4083  {'200': 4083}
+
+OBSERVED TRAFFIC SPLIT  (delta of vllm:request_success_total per version)
+  phase                                        v1      v2         ratio
+  baseline -> canary-9:1-start               1630      50      97% / 3%
+  canary-9:1-start -> canary-9:1-end         4289     499     90% / 10%
+  canary-9:1-end -> ramp-50-50-start          531      71     88% / 12%
+  ramp-50-50-start -> ramp-50-50-end         2394    2443     49% / 51%
+  ramp-50-50-end -> promote-start             193     169     53% / 47%
+  promote-start -> promote-end                            counters reset (v1 stopped)
+  promote-end -> rollback-start                 0     220      0% / 100%
+  rollback-start -> rollback-end             3568   11889     23% / 77%   (spans v1 restart)
+  rollback-end -> post-rollback-start         163      19     90% / 10%
+  post-rollback-start -> post-rollback-end   3500     438     89% / 11%
+
+FAILURE WINDOW, 10s buckets (from probe.log, t=0 at probe start)
+  t+  50s  200=  204 503=   617     <- `kubectl apply -f manifests/v2.yaml`
+  t+  60s  200=    0 503=  2721
+  ...      200=    0 503= ~2600/bucket for 27 consecutive buckets ...
+  t+ 320s  200=    0 503=  2557
+  t+ 330s  200=  113 503=  1495     <- v2 pod goes Ready (17:24:34Z)
+  t+ 750s  200=  260 503=     5 500=29   <- v1 stop (promote), 34 requests lost
+
+  v2 pod created 17:19:23Z, Ready 17:24:34Z (311s model load).
+  Hard outage 17:19:48Z -> 17:24:28Z = 280s at 100% failure.

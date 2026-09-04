@@ -1,0 +1,37 @@
+REQUESTS
+  total          65207
+  http 200       8498
+  non-200        56709
+  window         556s  (117.2 req/s)
+  latency p50/p99  0.15s / 0.16s
+  failure codes  {'503': 56709}
+  max gap between successes  65.32s
+
+PER-REQUEST STATUS BY PHASE  (phases delimited by timeline marks)
+  probe-start (v1 only, 100%)     20s  n=0     -
+  deploy-v2 (canary starting)    336s  n=0     -
+  canary 9:1 (90/10)          204s  n=0     -
+  ramp to 9:9 (50/50)         196s  n=0     -
+  promote (v1 stopped, v2 100%)    190s  n=0     -
+  rollback (v1 restarted, weights back to 9:1)    609s  n=0     -
+  steady state after rollback (9:1)    323s  n=0     -
+  unready member added (v3 Pending)      2s  n=0     -
+  unready member removed       86s  n=0     -
+  prewarm test: v3 deployed OUTSIDE group    325s  n=40607 {'503': 40377, '200': 230}
+  prewarm test: v3 joined group (9:1:1)    133s  n=3508  {'200': 3508}
+  test: model-based-routing-enabled=false on v3     84s  n=2253  {'200': 2218, '503': 35}
+  blast-radius test: unready member added    105s  n=17332 {'200': 1035, '503': 16297}
+  blast-radius test: unready member removed     59s  n=1507  {'200': 1507}
+
+OBSERVED TRAFFIC SPLIT  (delta of vllm:request_success_total per version)
+  phase                                   v1      v2         ratio
+  baseline -> canary-9:1-start          1630      50      97% / 3%
+  canary-9:1-start -> canary-9:1-end    4289     499     90% / 10%
+  canary-9:1-end -> ramp-50-50-start     531      71     88% / 12%
+  ramp-50-50-start -> ramp-50-50-end    2394    2443     49% / 51%
+  ramp-50-50-end -> promote-start        193     169     53% / 47%
+  promote-start -> promote-end                      counters reset
+  promote-end -> rollback-start            0     220     0% / 100%
+  rollback-start -> rollback-end        3568   11889     23% / 77%
+  rollback-end -> post-rollback-start     163      19     90% / 10%
+  post-rollback-start -> post-rollback-end    3500     438     89% / 11%

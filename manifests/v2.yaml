@@ -1,0 +1,58 @@
+# v2 -- the canary member of routing group `gemma-4-rollout`.
+#
+# Identical to v1 except for the serving config under test and the weight.
+# There is no "primary" vs "canary" flag in the API: every group member is
+# symmetric, and the split is decided purely by the weights.
+#
+# Start the canary at weight 1, never 0 -- a 0-weight backendRef can produce
+# transient connection errors in the data plane.
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: gemma-4-rollout-v2
+  namespace: robshaw-dev
+spec:
+  model:
+    uri: hf://RedHatAI/gemma-4-12B-it-FP8-Dynamic
+    # Must match v1 exactly (same model name, same LoRA adapter set).
+    name: gemma-4-rollout
+  replicas: 1
+  router:
+    route:
+      group: gemma-4-rollout
+      weight: 1
+    scheduler:
+      template:
+        imagePullSecrets:
+          - name: rhai-pull-secret
+        containers:
+          - name: main
+    gateway: { }
+  template:
+    imagePullSecrets:
+      - name: rhai-pull-secret
+    containers:
+      - name: main
+        image: quay.io/vllm/automation-vllm:0.24.0_rhaiv.12
+        env:
+          # The change under test: a tighter batching config.
+          - name: VLLM_ADDITIONAL_ARGS
+            value: "--max-num-seqs 64 --max-num-batched-tokens 8192"
+        resources:
+          limits:
+            cpu: '8'
+            memory: 16Gi
+            nvidia.com/gpu: "1"
+          requests:
+            cpu: '8'
+            memory: 16Gi
+            nvidia.com/gpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTPS
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 30
+          failureThreshold: 5

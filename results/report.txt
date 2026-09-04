@@ -1,0 +1,20 @@
+REQUESTS
+  total          37182
+  http 200       1316
+  non-200        35866
+  window         264s  (140.8 req/s)
+  latency p50/p99  0.15s / 0.16s
+  failure codes  {'503': 35866}
+  max gap between successes  0.17s
+
+PER-REQUEST STATUS BY PHASE  (phases delimited by timeline marks)
+  probe-start                  36s  n=435   {'200': 435}
+  canary                      228s  n=36746 {'200': 880, '503': 35866}
+
+OBSERVED TRAFFIC SPLIT  (delta of vllm:request_success_total per version)
+  phase                                   v1      v2         ratio
+  before -> after                       1237       0     100% / 0%
+  after -> after                           0       0             -
+  after -> after                           0       0             -
+  after -> after                           0       0             -
+  after -> after                           0       0             -

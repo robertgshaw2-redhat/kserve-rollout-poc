@@ -1,0 +1,58 @@
+# v1 -- the "production" member of routing group `gemma-4-rollout`.
+#
+# Two fields make this a rollout participant:
+#   spec.router.route.group   -- which version family this LLMISVC belongs to
+#   spec.router.route.weight  -- its proportional share of group traffic
+#
+# Weights are proportional, not percentages. v1=9 / v2=1 is a 90/10 split.
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: gemma-4-rollout-v1
+  namespace: robshaw-dev
+spec:
+  model:
+    uri: hf://RedHatAI/gemma-4-12B-it-FP8-Dynamic
+    # Every member of a group must serve the SAME model name -- that name is
+    # what the version-agnostic publisher route dispatches on.
+    name: gemma-4-rollout
+  replicas: 2
+  router:
+    route:
+      group: gemma-4-rollout
+      weight: 9
+    scheduler:
+      template:
+        imagePullSecrets:
+          - name: rhai-pull-secret
+        containers:
+          - name: main
+    gateway: { }
+  template:
+    imagePullSecrets:
+      - name: rhai-pull-secret
+    containers:
+      - name: main
+        image: quay.io/vllm/automation-vllm:0.24.0_rhaiv.12
+        env:
+          # The v1 serving config. v2 changes this line -- see manifests/v2.yaml.
+          - name: VLLM_ADDITIONAL_ARGS
+            value: "--max-num-seqs 256"
+        resources:
+          limits:
+            cpu: '8'
+            memory: 16Gi
+            nvidia.com/gpu: "1"
+          requests:
+            cpu: '8'
+            memory: 16Gi
+            nvidia.com/gpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTPS
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 30
+          failureThreshold: 5
