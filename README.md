@@ -1,16 +1,32 @@
-# What the POC measured
+# Rollout POC
+- The weighting mechanism works exactly as documented
+- The rollout is not zero-downtime as the guide writes it
 
-Cluster `statler`, namespace `robshaw-dev`, KServe LLMInferenceService v1alpha2
-(RHOAI 3.5.0 configs), Istio inference-gateway with Gateway API InferencePools.
-Model: `RedHatAI/gemma-4-12B-it-FP8-Dynamic` served under the group model name
-`gemma-4-rollout`, vLLM `quay.io/vllm/automation-vllm:0.24.0_rhaiv.12`, 1 GPU
-per replica. v1 = 2 replicas / `--max-num-seqs 256`, v2 = 1 replica /
-`--max-num-seqs 64 --max-num-batched-tokens 8192`.
+When the new LLMInferenceService is not READY, ALLM requests fail with 503.
 
-A 4-worker client hit the version-agnostic publisher path continuously through
-every step. Traffic attribution comes from `vllm:request_success_total` scraped
-off each version's pods, so the split is what the model servers actually saw,
-not what the manifests asked for.
+```bash
+./scripts/rollout.sh deploy-v1      # step 1: production, weight 9
+./scripts/probe.sh   start          # continuous client, from here on it never stops
+
+./scripts/probe.sh   mark "canary"  # timestamps a phase boundary in the report
+./scripts/probe.sh   split before
+./scripts/rollout.sh deploy-v2      # step 2: canary at 9:1  -- THIS IS THE OUTAGE
+./scripts/probe.sh   split after
+
+./scripts/rollout.sh validate       # step 3: per-version TTFT / e2e latency
+./scripts/rollout.sh ramp 9         # step 4: 50/50
+./scripts/rollout.sh promote        # step 5: stop v1, v2 takes everything
+./scripts/rollout.sh rollback       # step 6: v2 back to weight 1, restart v1
+./scripts/rollout.sh decommission   # step 7: delete v1
+
+./scripts/probe.sh   report         # downtime + measured split per phase
+./scripts/probe.sh   stop
+```
+
+`rollout.sh status` prints group membership as the controller sees it plus the
+weighted `backendRef`s it wrote into the HTTPRoutes. `rollout.sh direct v1|v2`
+hits one version by name, bypassing weights.
+
 
 ## The weighting mechanism works exactly as documented
 
