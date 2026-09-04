@@ -1,86 +1,86 @@
-# Zero-downtime rollout POC -- KServe LLMInferenceService canary
+# What the POC measured
 
-Runs the canary rollout from the KServe guide end to end against a live cluster,
-with a client hammering the endpoint the whole time, and measures whether it is
-actually zero-downtime.
+Cluster `statler`, namespace `robshaw-dev`, KServe LLMInferenceService v1alpha2
+(RHOAI 3.5.0 configs), Istio inference-gateway with Gateway API InferencePools.
+Model: `RedHatAI/gemma-4-12B-it-FP8-Dynamic` served under the group model name
+`gemma-4-rollout`, vLLM `quay.io/vllm/automation-vllm:0.24.0_rhaiv.12`, 1 GPU
+per replica. v1 = 2 replicas / `--max-num-seqs 256`, v2 = 1 replica /
+`--max-num-seqs 64 --max-num-batched-tokens 8192`.
 
-Guide: https://kserve.github.io/website/docs/model-serving/generative-inference/llmisvc/canary-rollout
+A 4-worker client hit the version-agnostic publisher path continuously through
+every step. Traffic attribution comes from `vllm:request_success_total` scraped
+off each version's pods, so the split is what the model servers actually saw,
+not what the manifests asked for.
 
-**Result: the traffic-shifting half is zero-downtime and works exactly as
-documented. Admitting the canary in the first place is not** -- it took the
-whole inference gateway down for 280s, including unrelated models. Numbers,
-isolation experiments and the two workarounds that failed are in
-[results/findings.md](results/findings.md).
+## The weighting mechanism works exactly as documented
 
-## What is here
+| step | weights | measured split |
+|---|---|---|
+| canary added | v1=9, v2=1 | 90% / 10% |
+| ramped | v1=9, v2=9 | 49% / 51% |
+| v1 stopped | v1 stopped, v2=9 | 0% / 100% |
+| rolled back | v1=9, v2=1 | 89% / 11% |
 
-```
-manifests/
-  v1.yaml        production member of routing group `gemma-4-rollout`, weight 9
-  v2.yaml        canary member, same model name, weight 1, different vLLM batching config
-  loadgen.yaml   in-cluster 4-worker client on the version-agnostic publisher path
-scripts/
-  rollout.sh     one subcommand per step of the guide
-  probe.sh       start/mark/split/report the traffic probe
-  prewarm.py     splits a member manifest into an ungrouped copy + its join patch
-  report.py      turns the probe log into downtime + per-phase traffic split
-  lib.sh         settings; per-version request counts and latency from vLLM metrics
-results/         captured output of the run described in findings.md
-```
+Reweighting is genuinely zero-downtime: `kubectl patch` of `route.weight`
+restarted no pods, shifted traffic within seconds, and cost 0 failed requests
+out of 5195 in the 50/50 window. Throughput held at ~26 req/s and p50 latency
+at 0.15s across every reweight. `status.router.group` lists all members
+symmetrically, and `serving.kserve.io/stop=true` released v1's GPUs while
+keeping the object rollback-ready with its weight preserved (34 requests were
+lost at that moment: 5x503 + 29x500).
 
-The two versions differ only in `VLLM_ADDITIONAL_ARGS` -- a serving-config
-rollout. Bumping the `image` tag instead is the same procedure and the same
-manifest line; nothing else changes.
+Rollback took 9m57s end to end, all of it v1's pods reloading the model --
+weights themselves moved instantly.
 
-## Running it
+## The rollout is not zero-downtime as the guide writes it
 
-Needs a cluster with the LLMInferenceService controller, a Gateway API
-implementation with weighted `backendRef` support, and 3 spare GPUs.
-Namespace, names and gateway host are the defaults at the top of `scripts/lib.sh`
-and are all environment-overridable.
+**Creating the canary caused 280 seconds of 100% failure**: 69,169 consecutive
+503s from 25s after `kubectl apply -f v2.yaml` until v2's pod went Ready
+(17:19:48Z -> 17:24:28Z, v2 Ready at 17:24:34Z). Not 10% of traffic matching
+v2's weight -- all of it.
 
-```bash
-./scripts/rollout.sh deploy-v1      # step 1: production, weight 9
-./scripts/probe.sh   start          # continuous client, from here on it never stops
+Three follow-up experiments isolated the trigger. Each used a member pinned to
+an unschedulable `nodeSelector`, so it stayed `Pending` forever and cost no GPU.
 
-./scripts/probe.sh   mark "canary"  # timestamps a phase boundary in the report
-./scripts/probe.sh   split before
-./scripts/rollout.sh deploy-v2      # step 2: canary at 9:1  -- THIS IS THE OUTAGE
-./scripts/probe.sh   split after
+1. **Any group member with zero Ready endpoints fails the whole route.** With
+   v1 (2 healthy replicas) and v2 (1 healthy replica) serving fine, adding a
+   third member that could never schedule took the publisher path to 100% 503
+   within a minute. Deleting it restored traffic immediately. It is not about
+   model loading -- an empty pool is enough.
 
-./scripts/rollout.sh validate       # step 3: per-version TTFT / e2e latency
-./scripts/rollout.sh ramp 9         # step 4: 50/50
-./scripts/rollout.sh promote        # step 5: stop v1, v2 takes everything
-./scripts/rollout.sh rollback       # step 6: v2 back to weight 1, restart v1
-./scripts/rollout.sh decommission   # step 7: delete v1
+2. **The rejection happens before upstream selection.** Envoy access logs for
+   the failed requests show no upstream host (`"-"`), 0 upstream duration, and
+   an empty response-flag field, on requests whose selected cluster was the
+   *healthy* `gemma-4-rollout-v1-inference-pool`. Consistent with the endpoint
+   picker rejecting the request rather than a "no healthy upstream" failure.
 
-./scripts/probe.sh   report         # downtime + measured split per phase
-./scripts/probe.sh   stop
-```
+3. **The blast radius is the gateway, not the group.** During that outage the
+   name-scoped path of the healthy v1 (`/robshaw-dev/gemma-4-rollout-v1/...`)
+   also returned 503, and so did an unrelated LLMInferenceService in the same
+   namespace on the same gateway (`gemma-4-downstream`, different model name,
+   different pools) -- 5/5 requests 503, back to 200 within 40s of deleting the
+   unready member.
 
-`rollout.sh status` prints group membership as the controller sees it plus the
-weighted `backendRef`s it wrote into the HTTPRoutes. `rollout.sh direct v1|v2`
-hits one version by name, bypassing weights.
+## Two obvious workarounds that do not work
 
-## How the measurement works
+- **Deploy the canary outside the group first, patch it in once Ready.**
+  Implemented as `rollout.sh deploy-v2-safe`. It still produced 40,377 503s
+  during the model load. The controller groups members by `spec.model.name`,
+  not by `spec.router.route.group`: the HTTPRoute publisher rules picked up the
+  new inference pool the moment the object was created, group declared or not.
+  Joining the group afterwards was clean -- 3508/3508 requests 200.
+- **`serving.kserve.io/model-based-routing-enabled: "false"` via
+  `spec.annotations`.** Accepted by the API, did not restart pods, and did not
+  remove the member's pool from the publisher rules.
 
-The gateway VIP is not routable from a laptop, so the client runs in-cluster as
-`deploy/rollout-probe` and logs `<epoch_ms> <worker> <http_code> <seconds>` per
-request. Downtime comes from those status codes; the traffic split comes from
-`vllm:request_success_total` scraped off each version's pods, because the
-gateway does not expose per-version counters and the model servers are the only
-place that knows where a request really landed. Container logs rotate at ~10MB,
-which this probe fills in minutes -- `probe.sh mark` flushes the ring buffer to
-`results/probe.log` on every phase boundary.
+## Operational conclusion
 
-`rollout.sh validate` is the local stand-in for the guide's Prometheus query: it
-reads the vLLM TTFT and e2e-latency histograms straight off the pods, so the
-comparison works on a cluster with no query endpoint wired up.
+Weight-shifting is safe and instant; **admitting a new version is not**. On this
+stack a canary must be brought up when a gateway-wide outage for the duration of
+its model load is acceptable, or the whole inference gateway needs to be split
+so that a loading pool cannot take down unrelated services. Steps 3 through 7 of
+the guide -- validate, ramp, promote, roll back, decommission -- are all safe to
+run against live traffic exactly as written.
 
-## Reproducing the outage cheaply
-
-The failure needs no GPU and no model load -- any member with zero Ready
-endpoints does it. Add `nodeSelector: {rollout-poc/does-not-exist: "true"}` to a
-copy of `v2.yaml`, apply it, and the publisher path goes to 100% 503 within a
-minute; delete it and traffic returns immediately. That is the two-minute
-repro to hand to whoever owns the gateway.
+Worth filing upstream: an InferencePool with zero Ready endpoints should be
+skipped by the endpoint picker, not fail requests bound for its siblings.
